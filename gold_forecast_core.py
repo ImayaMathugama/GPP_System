@@ -22,34 +22,60 @@ DEFAULT_CONFIG = {
 
 
 def download_market_data(start_date: str, end_date=None) -> pd.DataFrame:
-    tickers = {
-        "gold": "GC=F",
-        "sp500": "^GSPC",
-        "vix": "^VIX",
-        "usd_proxy": "UUP",
-        "oil": "CL=F",
-        "tnx": "^TNX",
-        "btc": "BTC-USD"
+    # Primary + fallback symbols for reliability on cloud environments
+    ticker_candidates = {
+        "gold": ["GC=F", "GLD"],          # Gold futures -> fallback ETF
+        "sp500": ["^GSPC", "SPY"],        # Index -> fallback ETF
+        "vix": ["^VIX"],
+        "usd_proxy": ["UUP", "DX-Y.NYB"],
+        "oil": ["CL=F", "BZ=F"],          # WTI -> fallback Brent
+        "tnx": ["^TNX"],
+        "btc": ["BTC-USD"]
     }
 
-    frames = []
-    for col_name, ticker in tickers.items():
-        data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True, progress=False)
-        if data.empty:
-            raise ValueError(f"Downloaded empty data for ticker: {ticker}")
+    def fetch_close_series(symbol: str):
+        data = yf.download(symbol, start=start_date, end=end_date, auto_adjust=True, progress=False)
+        if data is None or data.empty or "Close" not in data.columns:
+            return None
 
         close_data = data["Close"]
 
         # yfinance may return Series or DataFrame depending on version/options
         if isinstance(close_data, pd.DataFrame):
-            s = close_data.iloc[:, 0].rename(col_name)
+            if close_data.shape[1] == 0:
+                return None
+            s = close_data.iloc[:, 0]
         else:
-            s = close_data.rename(col_name)
+            s = close_data
 
-        frames.append(s)
+        s = pd.to_numeric(s, errors="coerce").dropna()
+        if s.empty:
+            return None
+        return s
+
+    frames = []
+    used_symbols = {}
+
+    for col_name, candidates in ticker_candidates.items():
+        chosen_series = None
+        for sym in candidates:
+            s = fetch_close_series(sym)
+            if s is not None and not s.empty:
+                chosen_series = s.rename(col_name)
+                used_symbols[col_name] = sym
+                break
+
+        if chosen_series is None:
+            raise ValueError(f"Downloaded empty data for ticker group: {col_name} (tried {candidates})")
+
+        frames.append(chosen_series)
 
     df = pd.concat(frames, axis=1).sort_index()
     df = df.ffill().dropna()
+
+    if df.empty:
+        raise ValueError("Final merged market dataset is empty after alignment.")
+
     return df
 
 
